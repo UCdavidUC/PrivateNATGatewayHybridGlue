@@ -167,6 +167,19 @@ Conditions:
     - !Equals [!Ref SpokeVpcCidrCount, 2]
     - !Equals [!Ref SpokeVpcCidrCount, 3]
   HasThirdSpoke: !Equals [!Ref SpokeVpcCidrCount, 3]
+  # Compound conditions: spoke routes/NACLs only when both subnet is created AND spoke exists
+  Az1AndSecondSpoke: !And
+    - !Condition CreateNatSubnetAz1
+    - !Condition HasSecondSpoke
+  Az1AndThirdSpoke: !And
+    - !Condition CreateNatSubnetAz1
+    - !Condition HasThirdSpoke
+  Az2AndSecondSpoke: !And
+    - !Condition CreateNatSubnetAz2
+    - !Condition HasSecondSpoke
+  Az2AndThirdSpoke: !And
+    - !Condition CreateNatSubnetAz2
+    - !Condition HasThirdSpoke
 
 Rules:
   ValidateAz1SubnetParams:
@@ -242,7 +255,7 @@ Resources:
 
   RouteToSpoke1Az1:
     Type: AWS::EC2::Route
-    Condition: HasSecondSpoke
+    Condition: Az1AndSecondSpoke
     Properties:
       RouteTableId: !Ref NatRtAz1
       DestinationCidrBlock: !Select [1, !Ref SpokeVpcCidrs]
@@ -250,7 +263,7 @@ Resources:
 
   RouteToSpoke2Az1:
     Type: AWS::EC2::Route
-    Condition: HasThirdSpoke
+    Condition: Az1AndThirdSpoke
     Properties:
       RouteTableId: !Ref NatRtAz1
       DestinationCidrBlock: !Select [2, !Ref SpokeVpcCidrs]
@@ -303,7 +316,7 @@ Resources:
 
   NaclIngressSpoke1Az1:
     Type: AWS::EC2::NetworkAclEntry
-    Condition: HasSecondSpoke
+    Condition: Az1AndSecondSpoke
     Properties:
       NetworkAclId: !Ref NaclAz1
       RuleNumber: 110
@@ -317,7 +330,7 @@ Resources:
 
   NaclIngressSpoke2Az1:
     Type: AWS::EC2::NetworkAclEntry
-    Condition: HasThirdSpoke
+    Condition: Az1AndThirdSpoke
     Properties:
       NetworkAclId: !Ref NaclAz1
       RuleNumber: 120
@@ -373,7 +386,7 @@ Resources:
 
   NaclEgressReturnSpoke1Az1:
     Type: AWS::EC2::NetworkAclEntry
-    Condition: HasSecondSpoke
+    Condition: Az1AndSecondSpoke
     Properties:
       NetworkAclId: !Ref NaclAz1
       RuleNumber: 210
@@ -387,7 +400,7 @@ Resources:
 
   NaclEgressReturnSpoke2Az1:
     Type: AWS::EC2::NetworkAclEntry
-    Condition: HasThirdSpoke
+    Condition: Az1AndThirdSpoke
     Properties:
       NetworkAclId: !Ref NaclAz1
       RuleNumber: 220
@@ -487,7 +500,7 @@ Resources:
 
   RouteToSpoke1Az2:
     Type: AWS::EC2::Route
-    Condition: HasSecondSpoke
+    Condition: Az2AndSecondSpoke
     Properties:
       RouteTableId: !Ref NatRtAz2
       DestinationCidrBlock: !Select [1, !Ref SpokeVpcCidrs]
@@ -495,8 +508,236 @@ Resources:
 
   RouteToSpoke2Az2:
     Type: AWS::EC2::Route
-    Condition: HasThirdSpoke
+    Condition: Az2AndThirdSpoke
     Properties:
       RouteTableId: !Ref NatRtAz2
       DestinationCidrBlock: !Select [2, !Ref SpokeVpcCidrs]
       TransitGatewayId: !Ref TransitGatewayId
+
+  # NACL AZ2
+  NaclAz2:
+    Type: AWS::EC2::NetworkAcl
+    Condition: CreateNatSubnetAz2
+    Properties:
+      VpcId: !Ref HubVpcId
+      Tags:
+        - Key: Name
+          Value: hub-nat-nacl-az2
+
+  NaclAssocAz2:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Condition: CreateNatSubnetAz2
+    Properties:
+      SubnetId: !Ref NatSubnetAz2Resource
+      NetworkAclId: !Ref NaclAz2
+
+  NaclEgressOnPremAz2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz2
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Ref OnPremisesCidr
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressSpoke0Az2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz2
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Select [0, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressSpoke1Az2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: Az2AndSecondSpoke
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Select [1, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressSpoke2Az2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: Az2AndThirdSpoke
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 120
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Select [2, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressHubAz2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz2
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Ref HubVpcCidr
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressReturnAz2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz2
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 300
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Ref OnPremisesCidr
+      PortRange:
+        From: 1024
+        To: 65535
+
+  NaclEgressReturnSpoke0Az2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz2
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Select [0, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: 1024
+        To: 65535
+
+  NaclEgressReturnSpoke1Az2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: Az2AndSecondSpoke
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 210
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Select [1, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: 1024
+        To: 65535
+
+  NaclEgressReturnSpoke2Az2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: Az2AndThirdSpoke
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 220
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Select [2, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: 1024
+        To: 65535
+
+  NaclEgressReturnHubAz2:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz2
+    Properties:
+      NetworkAclId: !Ref NaclAz2
+      RuleNumber: 300
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Ref HubVpcCidr
+      PortRange:
+        From: 1024
+        To: 65535
+
+  # NAT Gateway AZ2
+  PrivateNatGatewayAz2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      ConnectivityType: private
+      SubnetId: !If
+        - CreateNatSubnetAz2
+        - !Ref NatSubnetAz2Resource
+        - !Ref ExistingNatSubnetIdAz2
+      PrivateIpAddress: !Ref NatPrivateIpAz2
+      Tags:
+        - Key: Name
+          Value: hub-private-nat-gw-az2
+
+Outputs:
+  NatGatewayPrivateIpAz1:
+    Description: >
+      Private IP for NAT Gateway in AZ1.
+      Whitelist this IP in the on-premises firewall.
+    Value: !Ref NatPrivateIpAz1
+    Export:
+      Name: !Sub ${AWS::StackName}-NatPrivateIpAz1
+
+  NatGatewayPrivateIpAz2:
+    Description: >
+      Private IP for NAT Gateway in AZ2.
+      Whitelist this IP in the on-premises firewall.
+    Value: !Ref NatPrivateIpAz2
+    Export:
+      Name: !Sub ${AWS::StackName}-NatPrivateIpAz2
+
+  FirewallWhitelistIps:
+    Description: Both private IPs to whitelist in the on-premises firewall
+    Value: !Sub '${NatPrivateIpAz1}, ${NatPrivateIpAz2}'
+
+  NatGatewayIdAz1:
+    Description: NAT Gateway ID in AZ1
+    Value: !Ref PrivateNatGatewayAz1
+    Export:
+      Name: !Sub ${AWS::StackName}-NatGatewayIdAz1
+
+  NatGatewayIdAz2:
+    Description: NAT Gateway ID in AZ2
+    Value: !Ref PrivateNatGatewayAz2
+    Export:
+      Name: !Sub ${AWS::StackName}-NatGatewayIdAz2
+
+  NatSubnetIdAz1:
+    Description: NAT subnet ID in AZ1
+    Value: !If
+      - CreateNatSubnetAz1
+      - !Ref NatSubnetAz1Resource
+      - !Ref ExistingNatSubnetIdAz1
+    Export:
+      Name: !Sub ${AWS::StackName}-NatSubnetIdAz1
+
+  NatSubnetIdAz2:
+    Description: NAT subnet ID in AZ2
+    Value: !If
+      - CreateNatSubnetAz2
+      - !Ref NatSubnetAz2Resource
+      - !Ref ExistingNatSubnetIdAz2
+    Export:
+      Name: !Sub ${AWS::StackName}-NatSubnetIdAz2
+
+  TransitGatewayId:
+    Description: Transit Gateway ID for spoke account references
+    Value: !Ref TransitGatewayId
+    Export:
+      Name: !Sub ${AWS::StackName}-TransitGatewayId
