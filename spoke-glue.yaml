@@ -1,8 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Spoke account Glue resources for private connectivity to on-premises
-  databases via the hub account's private NAT Gateway and Transit Gateway.
-  Deploy this in each workload account that runs Glue ETL jobs.
+  databases via the hub account's private NAT Gateways and Transit Gateway.
+  Deploy in each workload account that runs Glue ETL jobs.
+  Prerequisites (managed by Control Tower / Landing Zone):
+  - Spoke VPC with TGW attachment already provisioned
+  - TGW route tables configured for spoke-to-hub traffic
+  This template only creates: Glue connection, security group, IAM role,
+  VPC endpoints, and a route table for the dedicated Glue subnets.
+  It does NOT modify any existing Control Tower managed resources.
 
 Parameters:
   SpokeVpcId:
@@ -30,7 +36,9 @@ Parameters:
 
   TransitGatewayId:
     Type: String
-    Description: Transit Gateway ID (from hub networking account)
+    Description: >
+      Transit Gateway ID (pre-existing, from Control Tower Landing Zone).
+      The spoke VPC must already have a TGW attachment.
     AllowedPattern: 'tgw-[a-z0-9]+'
 
   OnPremisesCidr:

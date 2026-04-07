@@ -2,8 +2,14 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Hub networking account resources for private NAT Gateways (2 AZs).
   Centralizes on-premises connectivity through two private IPs (one per AZ)
-  for firewall whitelisting. Deployed in the networking/hub account
-  that owns the Transit Gateway and VPN connection.
+  for firewall whitelisting. Deployed in the networking/hub account.
+  Prerequisites (managed by Control Tower / Landing Zone):
+  - Transit Gateway with VPN/DX attachment to on-premises
+  - Hub VPC with TGW attachment
+  - Spoke VPC TGW attachments and route table associations
+  This template only creates: NAT subnets, NAT Gateways, route tables
+  for the new NAT subnets, and NACLs. It does NOT modify any existing
+  Control Tower managed resources.
 
 Parameters:
   HubVpcId:
@@ -17,7 +23,9 @@ Parameters:
 
   TransitGatewayId:
     Type: String
-    Description: Transit Gateway ID shared across accounts
+    Description: >
+      Transit Gateway ID (pre-existing, from Control Tower Landing Zone).
+      The hub VPC must already have a TGW attachment.
     AllowedPattern: 'tgw-[a-z0-9]+'
 
   # --- AZ 1 NAT Subnet ---
@@ -106,8 +114,8 @@ Parameters:
     Type: String
     Default: ''
     Description: >
-      (Optional) Virtual Private Gateway ID if VPN terminates on a VGW.
-      Leave empty if VPN terminates on the Transit Gateway.
+      (Optional) Virtual Private Gateway ID if VPN terminates on a VGW
+      (pre-existing). Leave empty if VPN terminates on the Transit Gateway.
     AllowedPattern: '(vgw-[a-z0-9]+)?'
 
 Metadata:
