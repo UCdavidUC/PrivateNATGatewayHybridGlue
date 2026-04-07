@@ -1,0 +1,296 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Spoke account Glue resources for private connectivity to on-premises
+  databases via the hub account's private NAT Gateway and Transit Gateway.
+  Deploy this in each workload account that runs Glue ETL jobs.
+
+Parameters:
+  SpokeVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Spoke VPC ID (workload account)
+
+  SpokeVpcCidr:
+    Type: String
+    Description: Spoke VPC CIDR block
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+
+  GlueSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      DEDICATED private subnets for Glue ENIs only in the spoke VPC.
+      These subnets will get a new route table that sends on-prem traffic
+      to the Transit Gateway. WARNING: This replaces existing route table
+      associations. Do NOT use subnets shared with other workloads.
+
+  GlueSubnetCount:
+    Type: Number
+    Default: 1
+    AllowedValues: [1, 2, 3]
+    Description: Number of Glue subnets provided in GlueSubnetIds
+
+  TransitGatewayId:
+    Type: String
+    Description: Transit Gateway ID (from hub networking account)
+    AllowedPattern: 'tgw-[a-z0-9]+'
+
+  OnPremisesCidr:
+    Type: String
+    Description: On-premises CIDR block reachable via VPN (must match hub template)
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+
+  OnPremDbPort:
+    Type: Number
+    Default: 1521
+    Description: Start of the on-premises database port range
+
+  OnPremDbPortEnd:
+    Type: Number
+    Default: 1521
+    Description: End of the on-premises database port range (inclusive)
+
+  GlueConnectionName:
+    Type: String
+    Default: onprem-vpn-connection
+
+  GlueJobRoleName:
+    Type: String
+    Default: glue-onprem-role
+    Description: Name for the IAM role used by Glue jobs
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Spoke VPC & Transit Gateway
+        Parameters:
+          - SpokeVpcId
+          - SpokeVpcCidr
+          - TransitGatewayId
+      - Label:
+          default: Glue Subnets
+        Parameters:
+          - GlueSubnetIds
+          - GlueSubnetCount
+      - Label:
+          default: On-Premises Connectivity
+        Parameters:
+          - OnPremisesCidr
+          - OnPremDbPort
+          - OnPremDbPortEnd
+      - Label:
+          default: Glue Configuration
+        Parameters:
+          - GlueConnectionName
+          - GlueJobRoleName
+
+Conditions:
+  HasSecondGlueSubnet: !Or
+    - !Equals [!Ref GlueSubnetCount, 2]
+    - !Equals [!Ref GlueSubnetCount, 3]
+  HasThirdGlueSubnet: !Equals [!Ref GlueSubnetCount, 3]
+
+Resources:
+
+  # ---------------------------------------------------------------
+  # Route table for Glue subnets - on-prem traffic via TGW
+  # TGW routes it to hub VPC where NAT GW performs SNAT
+  # ---------------------------------------------------------------
+  GlueRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SpokeVpcId
+      Tags:
+        - Key: Name
+          Value: glue-subnets-rt
+
+  OnPremRouteViaTgw:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref GlueRouteTable
+      DestinationCidrBlock: !Ref OnPremisesCidr
+      TransitGatewayId: !Ref TransitGatewayId
+
+  GlueSubnetRtAssociation0:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Select [0, !Ref GlueSubnetIds]
+      RouteTableId: !Ref GlueRouteTable
+
+  GlueSubnetRtAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasSecondGlueSubnet
+    Properties:
+      SubnetId: !Select [1, !Ref GlueSubnetIds]
+      RouteTableId: !Ref GlueRouteTable
+
+  GlueSubnetRtAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: HasThirdGlueSubnet
+    Properties:
+      SubnetId: !Select [2, !Ref GlueSubnetIds]
+      RouteTableId: !Ref GlueRouteTable
+
+  # ---------------------------------------------------------------
+  # Security Group for Glue ENIs
+  # ---------------------------------------------------------------
+  GlueSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Glue ENIs - on-premises database via TGW and hub NAT GW
+      VpcId: !Ref SpokeVpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: !Ref OnPremDbPort
+          ToPort: !Ref OnPremDbPortEnd
+          CidrIp: !Ref OnPremisesCidr
+          Description: On-premises database access via TGW and hub NAT GW
+      Tags:
+        - Key: Name
+          Value: glue-onprem-sg
+
+  GlueSgSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref GlueSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref GlueSecurityGroup
+      Description: Glue inter-node communication (required)
+
+  GlueSgSelfEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref GlueSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      DestinationSecurityGroupId: !Ref GlueSecurityGroup
+      Description: Glue inter-node communication (required)
+
+  # ---------------------------------------------------------------
+  # Glue NETWORK Connection
+  # ---------------------------------------------------------------
+  GlueVpcConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Ref GlueConnectionName
+        ConnectionType: NETWORK
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Select [0, !GetAZs '']
+          SubnetId: !Select [0, !Ref GlueSubnetIds]
+          SecurityGroupIdList:
+            - !Ref GlueSecurityGroup
+        ConnectionProperties: {}
+
+  # ---------------------------------------------------------------
+  # IAM Role for Glue Jobs
+  # ---------------------------------------------------------------
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref GlueJobRoleName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueNetworkingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GlueEniManagement
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcAttribute
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                Resource: '*'
+              - Sid: GlueConnectionAccess
+                Effect: Allow
+                Action:
+                  - glue:GetConnection
+                  - glue:GetConnections
+                Resource:
+                  - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:connection/${GlueConnectionName}
+                  - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog
+              - Sid: GlueLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:GetLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*
+
+  # ---------------------------------------------------------------
+  # VPC Endpoints - Glue needs AWS service access without internet
+  # ---------------------------------------------------------------
+  S3VpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref SpokeVpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref GlueRouteTable
+
+  GlueVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref SpokeVpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.glue
+      VpcEndpointType: Interface
+      SubnetIds: !Ref GlueSubnetIds
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+      PrivateDnsEnabled: true
+
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow spoke VPC to reach VPC endpoints over HTTPS
+      VpcId: !Ref SpokeVpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref SpokeVpcCidr
+          Description: HTTPS from spoke VPC for VPC endpoints
+      Tags:
+        - Key: Name
+          Value: vpc-endpoints-sg
+
+Outputs:
+  GlueSecurityGroupId:
+    Description: Security group attached to Glue ENIs
+    Value: !Ref GlueSecurityGroup
+
+  GlueConnectionName:
+    Description: Reference this connection name in your Glue jobs
+    Value: !Ref GlueConnectionName
+
+  GlueJobRoleArn:
+    Description: IAM Role ARN for Glue jobs
+    Value: !GetAtt GlueJobRole.Arn
+
+  TrafficFlow:
+    Description: How traffic flows (no internet involved)
+    Value: >
+      Glue ENI (spoke VPC) -> TGW -> Hub VPC NAT GW (single private IP)
+      -> VGW/TGW -> VPN tunnel -> On-premises database

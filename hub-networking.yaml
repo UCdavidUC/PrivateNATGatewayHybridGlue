@@ -1,0 +1,502 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Hub networking account resources for private NAT Gateways (2 AZs).
+  Centralizes on-premises connectivity through two private IPs (one per AZ)
+  for firewall whitelisting. Deployed in the networking/hub account
+  that owns the Transit Gateway and VPN connection.
+
+Parameters:
+  HubVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Hub VPC ID (networking account) with existing VPN/DX connectivity
+
+  HubVpcCidr:
+    Type: String
+    Description: Hub VPC CIDR block
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+
+  TransitGatewayId:
+    Type: String
+    Description: Transit Gateway ID shared across accounts
+    AllowedPattern: 'tgw-[a-z0-9]+'
+
+  # --- AZ 1 NAT Subnet ---
+  ExistingNatSubnetIdAz1:
+    Type: String
+    Default: ''
+    Description: >
+      (Optional) Existing private subnet ID in AZ1 for NAT Gateway 1.
+      Leave empty to create a new subnet.
+
+  NatSubnetCidrAz1:
+    Type: String
+    Default: ''
+    Description: >
+      CIDR for new NAT subnet in AZ1 (e.g. 10.0.100.0/28).
+      Required when ExistingNatSubnetIdAz1 is empty.
+    AllowedPattern: '((\d{1,3}\.){3}\d{1,3}/\d{1,2})?'
+
+  NatSubnetAz1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Availability Zone for NAT Gateway 1
+
+  NatPrivateIpAz1:
+    Type: String
+    Description: >
+      Fixed private IP for NAT Gateway 1 (must be within AZ1 NAT subnet CIDR).
+      Whitelist this IP in the on-premises firewall.
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}'
+
+  # --- AZ 2 NAT Subnet ---
+  ExistingNatSubnetIdAz2:
+    Type: String
+    Default: ''
+    Description: >
+      (Optional) Existing private subnet ID in AZ2 for NAT Gateway 2.
+      Leave empty to create a new subnet.
+
+  NatSubnetCidrAz2:
+    Type: String
+    Default: ''
+    Description: >
+      CIDR for new NAT subnet in AZ2 (e.g. 10.0.101.0/28).
+      Required when ExistingNatSubnetIdAz2 is empty.
+    AllowedPattern: '((\d{1,3}\.){3}\d{1,3}/\d{1,2})?'
+
+  NatSubnetAz2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Availability Zone for NAT Gateway 2
+
+  NatPrivateIpAz2:
+    Type: String
+    Description: >
+      Fixed private IP for NAT Gateway 2 (must be within AZ2 NAT subnet CIDR).
+      Whitelist this IP in the on-premises firewall.
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}'
+
+  # --- On-Premises & Spoke Config ---
+  OnPremisesCidr:
+    Type: String
+    Description: On-premises CIDR block reachable via VPN
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+
+  SpokeVpcCidrs:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated spoke VPC CIDRs that send traffic through these
+      NAT Gateways (e.g. 10.1.0.0/16,10.2.0.0/16).
+
+  SpokeVpcCidrCount:
+    Type: Number
+    Default: 1
+    AllowedValues: [1, 2, 3]
+    Description: Number of spoke VPC CIDRs provided
+
+  OnPremDbPort:
+    Type: Number
+    Default: 1521
+    Description: Start of the on-premises database port range
+
+  OnPremDbPortEnd:
+    Type: Number
+    Default: 1521
+    Description: End of the on-premises database port range (inclusive)
+
+  VpnGatewayId:
+    Type: String
+    Default: ''
+    Description: >
+      (Optional) Virtual Private Gateway ID if VPN terminates on a VGW.
+      Leave empty if VPN terminates on the Transit Gateway.
+    AllowedPattern: '(vgw-[a-z0-9]+)?'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Hub VPC & Transit Gateway
+        Parameters:
+          - HubVpcId
+          - HubVpcCidr
+          - TransitGatewayId
+          - VpnGatewayId
+      - Label:
+          default: NAT Gateway - AZ 1
+        Parameters:
+          - NatSubnetAz1
+          - ExistingNatSubnetIdAz1
+          - NatSubnetCidrAz1
+          - NatPrivateIpAz1
+      - Label:
+          default: NAT Gateway - AZ 2
+        Parameters:
+          - NatSubnetAz2
+          - ExistingNatSubnetIdAz2
+          - NatSubnetCidrAz2
+          - NatPrivateIpAz2
+      - Label:
+          default: On-Premises Connectivity
+        Parameters:
+          - OnPremisesCidr
+          - OnPremDbPort
+          - OnPremDbPortEnd
+      - Label:
+          default: Spoke Accounts
+        Parameters:
+          - SpokeVpcCidrs
+          - SpokeVpcCidrCount
+
+Conditions:
+  CreateNatSubnetAz1: !Equals [!Ref ExistingNatSubnetIdAz1, '']
+  CreateNatSubnetAz2: !Equals [!Ref ExistingNatSubnetIdAz2, '']
+  HasVpnGateway: !Not [!Equals [!Ref VpnGatewayId, '']]
+  VpnOnTgw: !Equals [!Ref VpnGatewayId, '']
+  CreateAz1WithVgw: !And
+    - !Condition CreateNatSubnetAz1
+    - !Condition HasVpnGateway
+  CreateAz1VpnOnTgw: !And
+    - !Condition CreateNatSubnetAz1
+    - !Condition VpnOnTgw
+  CreateAz2WithVgw: !And
+    - !Condition CreateNatSubnetAz2
+    - !Condition HasVpnGateway
+  CreateAz2VpnOnTgw: !And
+    - !Condition CreateNatSubnetAz2
+    - !Condition VpnOnTgw
+  HasSecondSpoke: !Or
+    - !Equals [!Ref SpokeVpcCidrCount, 2]
+    - !Equals [!Ref SpokeVpcCidrCount, 3]
+  HasThirdSpoke: !Equals [!Ref SpokeVpcCidrCount, 3]
+
+Rules:
+  ValidateAz1SubnetParams:
+    RuleCondition: !Equals [!Ref ExistingNatSubnetIdAz1, '']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref NatSubnetCidrAz1, '']]
+        AssertDescription: NatSubnetCidrAz1 is required when ExistingNatSubnetIdAz1 is not provided.
+  ValidateAz2SubnetParams:
+    RuleCondition: !Equals [!Ref ExistingNatSubnetIdAz2, '']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref NatSubnetCidrAz2, '']]
+        AssertDescription: NatSubnetCidrAz2 is required when ExistingNatSubnetIdAz2 is not provided.
+
+Resources:
+
+  # =================================================================
+  # AZ 1 - NAT Subnet, Route Table, NACL, NAT Gateway
+  # =================================================================
+  NatSubnetAz1Resource:
+    Type: AWS::EC2::Subnet
+    Condition: CreateNatSubnetAz1
+    Properties:
+      VpcId: !Ref HubVpcId
+      CidrBlock: !Ref NatSubnetCidrAz1
+      AvailabilityZone: !Ref NatSubnetAz1
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: hub-private-nat-subnet-az1
+
+  NatRtAz1:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateNatSubnetAz1
+    Properties:
+      VpcId: !Ref HubVpcId
+      Tags:
+        - Key: Name
+          Value: hub-nat-subnet-rt-az1
+
+  NatRtAssocAz1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNatSubnetAz1
+    Properties:
+      SubnetId: !Ref NatSubnetAz1Resource
+      RouteTableId: !Ref NatRtAz1
+
+  # On-prem route via VGW (AZ1)
+  NatRouteOnPremVgwAz1:
+    Type: AWS::EC2::Route
+    Condition: CreateAz1WithVgw
+    Properties:
+      RouteTableId: !Ref NatRtAz1
+      DestinationCidrBlock: !Ref OnPremisesCidr
+      GatewayId: !Ref VpnGatewayId
+
+  # On-prem route via TGW (AZ1)
+  NatRouteOnPremTgwAz1:
+    Type: AWS::EC2::Route
+    Condition: CreateAz1VpnOnTgw
+    Properties:
+      RouteTableId: !Ref NatRtAz1
+      DestinationCidrBlock: !Ref OnPremisesCidr
+      TransitGatewayId: !Ref TransitGatewayId
+
+  # Return routes to spoke VPCs via TGW (AZ1)
+  RouteToSpoke0Az1:
+    Type: AWS::EC2::Route
+    Condition: CreateNatSubnetAz1
+    Properties:
+      RouteTableId: !Ref NatRtAz1
+      DestinationCidrBlock: !Select [0, !Ref SpokeVpcCidrs]
+      TransitGatewayId: !Ref TransitGatewayId
+
+  RouteToSpoke1Az1:
+    Type: AWS::EC2::Route
+    Condition: HasSecondSpoke
+    Properties:
+      RouteTableId: !Ref NatRtAz1
+      DestinationCidrBlock: !Select [1, !Ref SpokeVpcCidrs]
+      TransitGatewayId: !Ref TransitGatewayId
+
+  RouteToSpoke2Az1:
+    Type: AWS::EC2::Route
+    Condition: HasThirdSpoke
+    Properties:
+      RouteTableId: !Ref NatRtAz1
+      DestinationCidrBlock: !Select [2, !Ref SpokeVpcCidrs]
+      TransitGatewayId: !Ref TransitGatewayId
+
+  # NACL AZ1
+  NaclAz1:
+    Type: AWS::EC2::NetworkAcl
+    Condition: CreateNatSubnetAz1
+    Properties:
+      VpcId: !Ref HubVpcId
+      Tags:
+        - Key: Name
+          Value: hub-nat-nacl-az1
+
+  NaclAssocAz1:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Condition: CreateNatSubnetAz1
+    Properties:
+      SubnetId: !Ref NatSubnetAz1Resource
+      NetworkAclId: !Ref NaclAz1
+
+  NaclEgressOnPremAz1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz1
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Ref OnPremisesCidr
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressSpoke0Az1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz1
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Select [0, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressSpoke1Az1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: HasSecondSpoke
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Select [1, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressSpoke2Az1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: HasThirdSpoke
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 120
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Select [2, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressHubAz1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz1
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Ref HubVpcCidr
+      PortRange:
+        From: !Ref OnPremDbPort
+        To: !Ref OnPremDbPortEnd
+
+  NaclIngressReturnAz1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz1
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 300
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Ref OnPremisesCidr
+      PortRange:
+        From: 1024
+        To: 65535
+
+  NaclEgressReturnSpoke0Az1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz1
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Select [0, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: 1024
+        To: 65535
+
+  NaclEgressReturnSpoke1Az1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: HasSecondSpoke
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 210
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Select [1, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: 1024
+        To: 65535
+
+  NaclEgressReturnSpoke2Az1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: HasThirdSpoke
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 220
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Select [2, !Ref SpokeVpcCidrs]
+      PortRange:
+        From: 1024
+        To: 65535
+
+  NaclEgressReturnHubAz1:
+    Type: AWS::EC2::NetworkAclEntry
+    Condition: CreateNatSubnetAz1
+    Properties:
+      NetworkAclId: !Ref NaclAz1
+      RuleNumber: 300
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: !Ref HubVpcCidr
+      PortRange:
+        From: 1024
+        To: 65535
+
+  # NAT Gateway AZ1
+  PrivateNatGatewayAz1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      ConnectivityType: private
+      SubnetId: !If
+        - CreateNatSubnetAz1
+        - !Ref NatSubnetAz1Resource
+        - !Ref ExistingNatSubnetIdAz1
+      PrivateIpAddress: !Ref NatPrivateIpAz1
+      Tags:
+        - Key: Name
+          Value: hub-private-nat-gw-az1
+
+  # =================================================================
+  # AZ 2 - NAT Subnet, Route Table, NACL, NAT Gateway
+  # =================================================================
+  NatSubnetAz2Resource:
+    Type: AWS::EC2::Subnet
+    Condition: CreateNatSubnetAz2
+    Properties:
+      VpcId: !Ref HubVpcId
+      CidrBlock: !Ref NatSubnetCidrAz2
+      AvailabilityZone: !Ref NatSubnetAz2
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: hub-private-nat-subnet-az2
+
+  NatRtAz2:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateNatSubnetAz2
+    Properties:
+      VpcId: !Ref HubVpcId
+      Tags:
+        - Key: Name
+          Value: hub-nat-subnet-rt-az2
+
+  NatRtAssocAz2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNatSubnetAz2
+    Properties:
+      SubnetId: !Ref NatSubnetAz2Resource
+      RouteTableId: !Ref NatRtAz2
+
+  # On-prem route via VGW (AZ2)
+  NatRouteOnPremVgwAz2:
+    Type: AWS::EC2::Route
+    Condition: CreateAz2WithVgw
+    Properties:
+      RouteTableId: !Ref NatRtAz2
+      DestinationCidrBlock: !Ref OnPremisesCidr
+      GatewayId: !Ref VpnGatewayId
+
+  # On-prem route via TGW (AZ2)
+  NatRouteOnPremTgwAz2:
+    Type: AWS::EC2::Route
+    Condition: CreateAz2VpnOnTgw
+    Properties:
+      RouteTableId: !Ref NatRtAz2
+      DestinationCidrBlock: !Ref OnPremisesCidr
+      TransitGatewayId: !Ref TransitGatewayId
+
+  # Return routes to spoke VPCs via TGW (AZ2)
+  RouteToSpoke0Az2:
+    Type: AWS::EC2::Route
+    Condition: CreateNatSubnetAz2
+    Properties:
+      RouteTableId: !Ref NatRtAz2
+      DestinationCidrBlock: !Select [0, !Ref SpokeVpcCidrs]
+      TransitGatewayId: !Ref TransitGatewayId
+
+  RouteToSpoke1Az2:
+    Type: AWS::EC2::Route
+    Condition: HasSecondSpoke
+    Properties:
+      RouteTableId: !Ref NatRtAz2
+      DestinationCidrBlock: !Select [1, !Ref SpokeVpcCidrs]
+      TransitGatewayId: !Ref TransitGatewayId
+
+  RouteToSpoke2Az2:
+    Type: AWS::EC2::Route
+    Condition: HasThirdSpoke
+    Properties:
+      RouteTableId: !Ref NatRtAz2
+      DestinationCidrBlock: !Select [2, !Ref SpokeVpcCidrs]
+      TransitGatewayId: !Ref TransitGatewayId
